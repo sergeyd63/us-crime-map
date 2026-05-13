@@ -27,10 +27,27 @@ export type JurisdictionStats = {
   totalRate: number | null;
   violentRate: number | null;
   propertyRate: number | null;
+  hasData: boolean;
+  demographics?: JurisdictionDemographics;
   reportingAgencies?: number;
   caveats?: string | null;
   source: string;
   refreshedAt: string;
+};
+
+export type DemographicGroup = {
+  key: string;
+  label: string;
+  count: number | null;
+  percent: number | null;
+};
+
+export type JurisdictionDemographics = {
+  year: number;
+  source: string;
+  sourceUrl: string;
+  raceEthnicity: DemographicGroup[];
+  caveats: string[];
 };
 
 type CacheEnvelope<T> = {
@@ -48,6 +65,8 @@ type SummarizedResponse = {
     population?: Record<string, Record<string, unknown>>;
   };
 };
+
+type CensusApiRow = Record<string, string | undefined>;
 
 type CountyTopology = {
   objects: {
@@ -71,15 +90,37 @@ const API_BASE = (process.env.FBI_API_BASE || "https://api.usa.gov/crime/fbi/cde
   .replace(/\/+$/, "")
   .replace(/\/api$/, "");
 const API_KEY = process.env.FBI_API_KEY || process.env.DATA_GOV_API_KEY || process.env.API_KEY || "";
+const CENSUS_API_KEY = process.env.CENSUS_API_KEY || process.env.CENSUS_KEY || "";
 const DATA_YEAR = Number(process.env.CRIME_DATA_YEAR || "2024");
-const CACHE_TTL_MINUTES = Number(process.env.CACHE_TTL_MINUTES || "1440");
+const ACS_YEAR = Number(process.env.CENSUS_ACS_YEAR || DATA_YEAR);
+const DAILY_CACHE_TTL_MINUTES = 1440;
+const configuredCacheTtlMinutes = Number(process.env.CACHE_TTL_MINUTES || DAILY_CACHE_TTL_MINUTES);
+const CACHE_TTL_MINUTES =
+  Number.isFinite(configuredCacheTtlMinutes) && configuredCacheTtlMinutes > DAILY_CACHE_TTL_MINUTES
+    ? configuredCacheTtlMinutes
+    : DAILY_CACHE_TTL_MINUTES;
 const CACHE_ROOT = path.join(process.cwd(), ".cache", "crime");
 const OFFICIAL_SOURCE =
-  "FBI Crime Data API, FBI CIUS publication tables, and U.S. Census Bureau county population estimates";
+  "FBI Crime Data API, FBI CIUS publication tables, U.S. Census Bureau county population estimates, and U.S. Census Bureau ACS demographics";
 const TABLE_10_KEY = "_all/Table10.zip";
 const COUNTY_POPULATION_URL =
   process.env.COUNTY_POPULATION_URL ||
   `https://www2.census.gov/programs-surveys/popest/datasets/2020-${DATA_YEAR}/counties/totals/co-est${DATA_YEAR}-alldata.csv`;
+const CENSUS_API_BASE = "https://api.census.gov/data";
+const ACS_DEMOGRAPHICS_SOURCE = `U.S. Census Bureau ${ACS_YEAR} ACS 5-Year detailed tables B02001 and B03003`;
+const ACS_DEMOGRAPHICS_SOURCE_URL = `https://api.census.gov/data/${ACS_YEAR}/acs/acs5`;
+const DEMOGRAPHICS_CACHE_MODE = CENSUS_API_KEY ? "with-census-key" : "missing-census-key";
+const RACE_ETHNICITY_VARIABLES = [
+  "B02001_001E",
+  "B02001_002E",
+  "B02001_003E",
+  "B02001_004E",
+  "B02001_005E",
+  "B02001_006E",
+  "B02001_007E",
+  "B02001_008E",
+  "B03003_003E"
+] as const;
 
 class OfficialApiError extends Error {
   status: number;
@@ -112,6 +153,14 @@ const numberOrNull = (value: unknown): number | null => {
   return Number.isFinite(numberValue) ? numberValue : null;
 };
 
+const percent = (count: number | null, total: number | null) => {
+  if (count == null || total == null || total <= 0) {
+    return null;
+  }
+
+  return (count / total) * 100;
+};
+
 const sumSeries = (series?: Record<string, unknown>): number | null =>
   series ? Object.values(series).reduce<number>((total, value) => total + (numberOrNull(value) || 0), 0) : null;
 
@@ -139,6 +188,12 @@ const countyFipsByStateAndName = new Map(
     return [`${fips.slice(0, 2)}:${normalizeName(geometry.properties?.name || "")}`, fips];
   })
 );
+const countyNameByFips = new Map(
+  countiesTopology.objects.counties.geometries.map((geometry) => [
+    String(geometry.id).padStart(5, "0"),
+    geometry.properties?.name || String(geometry.id).padStart(5, "0")
+  ])
+);
 
 const stateNameToRef = new Map(US_STATES.map((state) => [normalizeName(state.name), state]));
 
@@ -149,6 +204,14 @@ const redactUrl = (url: URL) => {
   }
   if (copy.searchParams.has("API_KEY")) {
     copy.searchParams.set("API_KEY", "REDACTED");
+  }
+  return copy.toString();
+};
+
+const redactCensusUrl = (url: URL) => {
+  const copy = new URL(url.toString());
+  if (copy.searchParams.has("key")) {
+    copy.searchParams.set("key", "REDACTED");
   }
   return copy.toString();
 };
@@ -214,11 +277,53 @@ async function fetchText(url: string) {
   return response.text();
 }
 
-async function readCache<T>(key: string, refresh: boolean) {
-  if (refresh) {
-    return null;
+async function fetchCensusRows(params: Record<string, string>) {
+  if (!CENSUS_API_KEY) {
+    throw new OfficialApiError(
+      401,
+      "",
+      "Missing CENSUS_API_KEY. Add a Census API key to .env to load official ACS race and ethnicity demographics."
+    );
   }
 
+  const url = new URL(`${CENSUS_API_BASE}/${ACS_YEAR}/acs/acs5`);
+  Object.entries(params).forEach(([key, value]) => {
+    url.searchParams.set(key, value);
+  });
+  url.searchParams.set("key", CENSUS_API_KEY);
+
+  const response = await fetch(url, {
+    headers: {
+      Accept: "application/json"
+    }
+  });
+  const body = await response.text();
+
+  if (!response.ok) {
+    throw new OfficialApiError(response.status, redactCensusUrl(url), body.slice(0, 240) || response.statusText);
+  }
+
+  let table: unknown;
+  try {
+    table = JSON.parse(body);
+  } catch {
+    const detail = body.includes("Invalid Key")
+      ? "Census API rejected CENSUS_API_KEY."
+      : "Census API returned a non-JSON response.";
+    throw new OfficialApiError(502, redactCensusUrl(url), detail);
+  }
+
+  if (!Array.isArray(table) || table.length === 0 || !Array.isArray(table[0])) {
+    throw new OfficialApiError(502, redactCensusUrl(url), "Census API returned an unexpected table shape.");
+  }
+
+  const [header, ...rows] = table as string[][];
+  return rows.map((row) =>
+    Object.fromEntries(header.map((column, index) => [column, row[index]])) as CensusApiRow
+  );
+}
+
+async function readCache<T>(key: string, _refresh: boolean) {
   try {
     const raw = await readFile(cachePath(key), "utf8");
     const envelope = JSON.parse(raw) as CacheEnvelope<T>;
@@ -257,6 +362,143 @@ const getOffenseSeries = (payload: SummarizedResponse, locationName: string) => 
 
 const getPopulation = (payload: SummarizedResponse, locationName: string): number | null =>
   latestValue(payload.populations?.population?.[locationName]);
+
+const unavailableDemographics = (caveat: string): JurisdictionDemographics => ({
+  year: ACS_YEAR,
+  source: ACS_DEMOGRAPHICS_SOURCE,
+  sourceUrl: ACS_DEMOGRAPHICS_SOURCE_URL,
+  raceEthnicity: [],
+  caveats: [caveat]
+});
+
+const demographicGroup = (key: string, label: string, count: number | null, total: number | null): DemographicGroup => ({
+  key,
+  label,
+  count,
+  percent: percent(count, total)
+});
+
+function buildDemographics(row: CensusApiRow): JurisdictionDemographics {
+  const total = numberOrNull(row.B02001_001E);
+
+  return {
+    year: ACS_YEAR,
+    source: ACS_DEMOGRAPHICS_SOURCE,
+    sourceUrl: ACS_DEMOGRAPHICS_SOURCE_URL,
+    raceEthnicity: [
+      demographicGroup("white", "White alone", numberOrNull(row.B02001_002E), total),
+      demographicGroup("black", "Black or African American alone", numberOrNull(row.B02001_003E), total),
+      demographicGroup(
+        "aian",
+        "American Indian and Alaska Native alone",
+        numberOrNull(row.B02001_004E),
+        total
+      ),
+      demographicGroup("asian", "Asian alone", numberOrNull(row.B02001_005E), total),
+      demographicGroup(
+        "nhpi",
+        "Native Hawaiian and Other Pacific Islander alone",
+        numberOrNull(row.B02001_006E),
+        total
+      ),
+      demographicGroup("other", "Some other race alone", numberOrNull(row.B02001_007E), total),
+      demographicGroup("twoOrMore", "Two or more races", numberOrNull(row.B02001_008E), total),
+      demographicGroup("hispanic", "Hispanic or Latino ethnicity", numberOrNull(row.B03003_003E), total)
+    ],
+    caveats: [
+      "Hispanic or Latino is an ethnicity collected separately from race, so it can overlap with race groups."
+    ]
+  };
+}
+
+async function fetchDemographicsByFips(kind: "state" | "county", refresh: boolean) {
+  const cacheKey = `demographics-${kind}-${ACS_YEAR}-${DEMOGRAPHICS_CACHE_MODE}-v2`;
+  const cached = await readCache<Record<string, JurisdictionDemographics>>(cacheKey, refresh);
+  if (cached) {
+    return new Map(Object.entries(cached.data));
+  }
+
+  const rows = await fetchCensusRows({
+    get: ["NAME", ...RACE_ETHNICITY_VARIABLES].join(","),
+    for: kind === "state" ? "state:*" : "county:*",
+    ...(kind === "county" ? { in: "state:*" } : {})
+  });
+
+  const demographicsByFips = new Map<string, JurisdictionDemographics>();
+  rows.forEach((row) => {
+    const state = String(row.state || "").padStart(2, "0");
+    const county = row.county != null ? String(row.county).padStart(3, "0") : "";
+    const fips = kind === "state" ? state : `${state}${county}`;
+
+    if (fips.trim()) {
+      demographicsByFips.set(fips, buildDemographics(row));
+    }
+  });
+
+  await writeCache(cacheKey, Object.fromEntries(demographicsByFips));
+  return demographicsByFips;
+}
+
+async function withDemographics(
+  stats: JurisdictionStats[],
+  kind: "state" | "county",
+  refresh: boolean
+): Promise<JurisdictionStats[]> {
+  try {
+    const demographicsByFips = await fetchDemographicsByFips(kind, refresh);
+    return stats.map((stat) => ({
+      ...stat,
+      demographics:
+        demographicsByFips.get(stat.fips) ||
+        unavailableDemographics("Official ACS race and ethnicity demographics were not returned for this area.")
+    }));
+  } catch (error) {
+    const caveat = error instanceof Error ? error.message : "Unable to load official ACS demographics.";
+    return stats.map((stat) => ({
+      ...stat,
+      demographics: unavailableDemographics(caveat)
+    }));
+  }
+}
+
+async function withCountyDemographics(
+  stats: JurisdictionStats[],
+  refresh: boolean,
+  refreshedAt: string
+): Promise<JurisdictionStats[]> {
+  try {
+    const demographicsByFips = await fetchDemographicsByFips("county", refresh);
+    const enrichedByFips = new Map<string, JurisdictionStats>();
+
+    stats.forEach((stat) => {
+      enrichedByFips.set(stat.fips, {
+        ...stat,
+        demographics:
+          demographicsByFips.get(stat.fips) ||
+          unavailableDemographics("Official ACS race and ethnicity demographics were not returned for this area.")
+      });
+    });
+
+    demographicsByFips.forEach((demographics, fips) => {
+      if (enrichedByFips.has(fips) || !countyNameByFips.has(fips)) {
+        return;
+      }
+
+      enrichedByFips.set(fips, {
+        ...countyWithoutCrimeData(fips, countyNameByFips.get(fips) || fips, refreshedAt),
+        demographics
+      });
+    });
+
+    return [...enrichedByFips.values()];
+  } catch (error) {
+    const caveat = error instanceof Error ? error.message : "Unable to load official ACS demographics.";
+    return stats.map((stat) => ({
+      ...stat,
+      demographics: unavailableDemographics(caveat)
+    }));
+  }
+}
 
 async function fetchStateSummary(state: UsState, offense: SummarizedOffenseCode) {
   return fetchOfficial<SummarizedResponse>(`/summarized/state/${state.abbr}/${offense}`, {
@@ -312,13 +554,14 @@ async function fetchStateStat(state: UsState, refreshedAt: string): Promise<Juri
     totalRate: rate(totalCrime, population),
     violentRate: rate(violentCrime, population),
     propertyRate: rate(propertyCrime, population),
+    hasData: totalCrime != null,
     source: OFFICIAL_SOURCE,
     refreshedAt
   };
 }
 
 export async function getStateStats(refresh = false) {
-  const cached = await readCache<JurisdictionStats[]>("states", refresh);
+  const cached = await readCache<JurisdictionStats[]>(`states-demographics-${DEMOGRAPHICS_CACHE_MODE}-v2`, refresh);
   if (cached) {
     return cached;
   }
@@ -330,7 +573,7 @@ export async function getStateStats(refresh = false) {
     stats.push(await fetchStateStat(state, refreshedAt));
   }
 
-  return writeCache("states", stats);
+  return writeCache(`states-demographics-${DEMOGRAPHICS_CACHE_MODE}-v2`, await withDemographics(stats, "state", refresh));
 }
 
 const emptyCounty = (fips: string, name: string, refreshedAt: string): JurisdictionStats => ({
@@ -354,6 +597,33 @@ const emptyCounty = (fips: string, name: string, refreshedAt: string): Jurisdict
   totalRate: null,
   violentRate: null,
   propertyRate: null,
+  hasData: false,
+  source: OFFICIAL_SOURCE,
+  refreshedAt
+});
+
+const countyWithoutCrimeData = (fips: string, name: string, refreshedAt: string): JurisdictionStats => ({
+  id: fips,
+  fips,
+  name,
+  kind: "county",
+  year: DATA_YEAR,
+  population: null,
+  totalCrime: null,
+  violentCrime: null,
+  propertyCrime: null,
+  homicide: null,
+  rape: null,
+  robbery: null,
+  aggravatedAssault: null,
+  burglary: null,
+  larceny: null,
+  motorVehicleTheft: null,
+  arson: null,
+  totalRate: null,
+  violentRate: null,
+  propertyRate: null,
+  hasData: false,
   source: OFFICIAL_SOURCE,
   refreshedAt
 });
@@ -419,56 +689,66 @@ function applyCountyRates(county: JurisdictionStats) {
 
 async function parseTable10Rows(refreshedAt: string) {
   const [workbook, populationByFips] = await Promise.all([fetchTable10Workbook(), fetchCountyPopulations()]);
-    const worksheet = workbook.Sheets[workbook.SheetNames[0]];
-    const rows = xlsx.utils.sheet_to_json<(string | number | null)[]>(worksheet, {
-      header: 1,
-      defval: null,
-      raw: false
-    });
+  const worksheet = workbook.Sheets[workbook.SheetNames[0]];
+  const rows = xlsx.utils.sheet_to_json<(string | number | null)[]>(worksheet, {
+    header: 1,
+    defval: null,
+    raw: false
+  });
 
-    const counties = new Map<string, JurisdictionStats>();
+  const counties = new Map<string, JurisdictionStats>();
 
-    rows.slice(5).forEach((row) => {
-      const state = stateNameToRef.get(normalizeName(String(row[0] || "")));
-      const countyName = String(row[2] || "").trim();
-      if (!state || !countyName) {
-        return;
-      }
+  rows.slice(5).forEach((row) => {
+    const state = stateNameToRef.get(normalizeName(String(row[0] || "")));
+    const countyName = String(row[2] || "").trim();
+    const offenseCells = row.slice(3, 13);
+    const hasReportedData = offenseCells.some((value) => numberOrNull(value) != null);
 
-      const fips = countyFipsByStateAndName.get(`${state.fips}:${normalizeName(countyName)}`);
-      if (!fips) {
-        return;
-      }
+    if (!state || !countyName || !hasReportedData) {
+      return;
+    }
 
-      const county = counties.get(fips) || emptyCounty(fips, countyName, refreshedAt);
-      county.population = populationByFips.get(fips) || null;
-      county.violentCrime = (county.violentCrime || 0) + (numberOrNull(row[3]) || 0);
-      county.homicide = (county.homicide || 0) + (numberOrNull(row[4]) || 0);
-      county.rape = (county.rape || 0) + (numberOrNull(row[5]) || 0);
-      county.robbery = (county.robbery || 0) + (numberOrNull(row[6]) || 0);
-      county.aggravatedAssault = (county.aggravatedAssault || 0) + (numberOrNull(row[7]) || 0);
-      county.propertyCrime = (county.propertyCrime || 0) + (numberOrNull(row[8]) || 0);
-      county.burglary = (county.burglary || 0) + (numberOrNull(row[9]) || 0);
-      county.larceny = (county.larceny || 0) + (numberOrNull(row[10]) || 0);
-      county.motorVehicleTheft = (county.motorVehicleTheft || 0) + (numberOrNull(row[11]) || 0);
-      county.arson = (county.arson || 0) + (numberOrNull(row[12]) || 0);
-      county.totalCrime = (county.violentCrime || 0) + (county.propertyCrime || 0);
-      applyCountyRates(county);
-      counties.set(fips, county);
-    });
+    const fips = countyFipsByStateAndName.get(`${state.fips}:${normalizeName(countyName)}`);
+    if (!fips) {
+      return;
+    }
 
-    return [...counties.values()];
+    const county = counties.get(fips) || emptyCounty(fips, countyName, refreshedAt);
+    county.population = populationByFips.get(fips) || null;
+    county.hasData = true;
+    county.violentCrime = (county.violentCrime || 0) + (numberOrNull(row[3]) || 0);
+    county.homicide = (county.homicide || 0) + (numberOrNull(row[4]) || 0);
+    county.rape = (county.rape || 0) + (numberOrNull(row[5]) || 0);
+    county.robbery = (county.robbery || 0) + (numberOrNull(row[6]) || 0);
+    county.aggravatedAssault = (county.aggravatedAssault || 0) + (numberOrNull(row[7]) || 0);
+    county.propertyCrime = (county.propertyCrime || 0) + (numberOrNull(row[8]) || 0);
+    county.burglary = (county.burglary || 0) + (numberOrNull(row[9]) || 0);
+    county.larceny = (county.larceny || 0) + (numberOrNull(row[10]) || 0);
+    county.motorVehicleTheft = (county.motorVehicleTheft || 0) + (numberOrNull(row[11]) || 0);
+    county.arson = (county.arson || 0) + (numberOrNull(row[12]) || 0);
+    county.totalCrime = (county.violentCrime || 0) + (county.propertyCrime || 0);
+    applyCountyRates(county);
+    counties.set(fips, county);
+  });
+
+  return [...counties.values()].filter((county) => county.hasData);
 }
 
 async function getAllCountyStats(refresh = false) {
-  const cached = await readCache<JurisdictionStats[]>("counties-all-population-v2", refresh);
+  const cached = await readCache<JurisdictionStats[]>(
+    `counties-all-population-demographics-${DEMOGRAPHICS_CACHE_MODE}-v2`,
+    refresh
+  );
   if (cached) {
     return cached;
   }
 
   const refreshedAt = new Date().toISOString();
   const data = await parseTable10Rows(refreshedAt);
-  return writeCache("counties-all-population-v2", data);
+  return writeCache(
+    `counties-all-population-demographics-${DEMOGRAPHICS_CACHE_MODE}-v2`,
+    await withCountyDemographics(data, refresh, refreshedAt)
+  );
 }
 
 export async function getCountyStats(stateAbbr: string, refresh = false) {
@@ -490,14 +770,19 @@ export function getSourceMeta() {
   return {
     apiBase: API_BASE,
     apiKeyMode: API_KEY ? "configured" : "missing",
+    censusApiKeyMode: CENSUS_API_KEY ? "configured" : "missing",
     cacheTtlMinutes: CACHE_TTL_MINUTES,
     dataYear: DATA_YEAR,
+    acsYear: ACS_YEAR,
     countyPopulationUrl: COUNTY_POPULATION_URL,
     source: OFFICIAL_SOURCE,
     notes: [
       "State values use the current FBI CDE summarized state endpoint for violent and property offense counts.",
       "County values use the official FBI CIUS Table 10 ZIP. The FBI notes Table 10 is county agency data, not full county totals.",
-      "State and county color percentages use U.S. Census Bureau population estimates for the selected data year."
+      "County rows with no reported offense cells are excluded from county calculations and color scaling.",
+      "State and county color rates use U.S. Census Bureau population estimates for the selected data year.",
+      "Race and ethnicity demographics use U.S. Census Bureau ACS 5-Year tables B02001 and B03003.",
+      `Official source data is stored locally under .cache/crime and refreshed at most once every ${CACHE_TTL_MINUTES} minutes.`
     ]
   };
 }

@@ -79,7 +79,8 @@ button:disabled {
 
 .segmented button,
 .text-button,
-.icon-button {
+.icon-button,
+.support-link {
   border: 0;
   color: #22302c;
   background: transparent;
@@ -88,6 +89,14 @@ button:disabled {
 .segmented button {
   min-width: 78px;
   padding: 9px 13px;
+}
+
+.rate-mode button {
+  min-width: 58px;
+}
+
+.color-mode button {
+  min-width: 68px;
 }
 
 .segmented button.active {
@@ -115,8 +124,23 @@ select {
 }
 
 .icon-button:hover,
-.text-button:hover:not(:disabled) {
+.text-button:hover:not(:disabled),
+.support-link:hover {
   background: #e8eeeb;
+}
+
+.support-link {
+  min-height: 39px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 12px;
+  border: 1px solid #cbd5d1;
+  border-radius: 8px;
+  background: #ffffff;
+  font-size: 0.9rem;
+  font-weight: 700;
+  text-decoration: none;
+  white-space: nowrap;
 }
 
 .workspace {
@@ -234,7 +258,6 @@ select {
 
 .legend {
   display: grid;
-  grid-template-columns: repeat(8, minmax(26px, 42px)) auto auto;
   align-items: center;
   gap: 6px;
   color: #65716d;
@@ -242,10 +265,41 @@ select {
   padding-left: 2px;
 }
 
-.legend span {
+.legend-gradient {
+  grid-template-columns: auto repeat(6, minmax(26px, 42px)) auto;
+}
+
+.legend-band {
   height: 10px;
   border-radius: 999px;
   border: 1px solid rgba(23, 33, 31, 0.1);
+}
+
+.race-legend {
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 8px 12px;
+  padding-right: 2px;
+}
+
+.race-legend-item {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.race-legend-swatch {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+  border: 1px solid rgba(23, 33, 31, 0.2);
+  border-radius: 4px;
+}
+
+.race-legend small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .loading-strip {
@@ -326,6 +380,72 @@ select {
 
 .offense-list {
   padding-top: 18px;
+}
+
+.demographics-section {
+  padding: 18px 0;
+  border-bottom: 1px solid #e1e6e4;
+  display: grid;
+  gap: 12px;
+}
+
+.demographics-section h3 {
+  margin: 0;
+  font-size: 0.95rem;
+  line-height: 1.2;
+  letter-spacing: 0;
+}
+
+.demographic-list {
+  display: grid;
+  gap: 11px;
+}
+
+.demographic-line {
+  display: grid;
+  gap: 5px;
+}
+
+.demographic-line > div:first-child {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: #596763;
+  font-size: 0.88rem;
+}
+
+.demographic-line strong {
+  color: #17211f;
+  white-space: nowrap;
+}
+
+.demographic-line small,
+.panel-note {
+  color: #65716d;
+  font-size: 0.82rem;
+}
+
+.demographic-bar {
+  height: 7px;
+  border-radius: 999px;
+  background: #e7ecea;
+  overflow: hidden;
+}
+
+.demographic-bar span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #2c7c71;
+}
+
+.panel-note {
+  margin: 0;
+  line-height: 1.4;
+}
+
+.panel-note.muted {
+  color: #7c8783;
 }
 
 .stat-line {

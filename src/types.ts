@@ -20,10 +20,37 @@ export type JurisdictionStats = {
   totalRate: number | null;
   violentRate: number | null;
   propertyRate: number | null;
+  hasData?: boolean;
+  demographics?: JurisdictionDemographics;
   reportingAgencies?: number;
   caveats?: string | null;
   source: string;
   refreshedAt: string;
+};
+
+export type DemographicMetricKey =
+  | "white"
+  | "black"
+  | "aian"
+  | "asian"
+  | "nhpi"
+  | "other"
+  | "twoOrMore"
+  | "hispanic";
+
+export type DemographicGroup = {
+  key: DemographicMetricKey;
+  label: string;
+  count: number | null;
+  percent: number | null;
+};
+
+export type JurisdictionDemographics = {
+  year: number;
+  source: string;
+  sourceUrl: string;
+  raceEthnicity: DemographicGroup[];
+  caveats: string[];
 };
 
 export type ApiEnvelope<T> = {
@@ -34,10 +61,20 @@ export type ApiEnvelope<T> = {
 
 export type SplitMode = "state" | "county";
 
+export type RateMode = "percent" | "per100k";
+
+export type ColorMetricMode = "crime" | "race";
+
 export type MetricKey = "totalRate" | "violentRate" | "propertyRate";
 
 export type MetricDefinition = {
   key: MetricKey;
+  label: string;
+  description: string;
+};
+
+export type DemographicMetricDefinition = {
+  key: DemographicMetricKey;
   label: string;
   description: string;
 };

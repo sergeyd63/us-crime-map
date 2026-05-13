@@ -14,9 +14,14 @@ import countiesTopology from 'us-atlas/counties-10m.json';
 import statesTopology from 'us-atlas/states-10m.json';
 import type {
   ApiEnvelope,
+  ColorMetricMode,
+  DemographicGroup,
+  DemographicMetricDefinition,
+  DemographicMetricKey,
   JurisdictionStats,
   MetricDefinition,
   MetricKey,
+  RateMode,
   SplitMode,
 } from './types';
 import { STATE_BY_FIPS } from './usStates';
@@ -54,24 +59,83 @@ const COLORS = [
   '#dc5a45',
   '#8d2f55',
 ];
+const BUY_ME_A_COFFEE_URL =
+  import.meta.env.VITE_BUYMEACOFFEE_URL || 'https://www.buymeacoffee.com/';
+const RACE_COLORS: Record<DemographicMetricKey, string> = {
+  white: '#2c7c71',
+  black: '#8d2f55',
+  aian: '#d06a32',
+  asian: '#2f6fb0',
+  nhpi: '#7b57c8',
+  other: '#8a6d3b',
+  twoOrMore: '#56606b',
+  hispanic: '#c74646',
+};
 
 const metrics: MetricDefinition[] = [
   {
     key: 'totalRate',
     label: 'All tracked',
-    description: 'Reported violent plus property offenses as a share of population',
+    description:
+      'Reported violent plus property offenses relative to population',
   },
   {
     key: 'violentRate',
     label: 'Violent',
     description:
-      'Reported murder, rape, robbery, and aggravated assault as a share of population',
+      'Reported murder, rape, robbery, and aggravated assault relative to population',
   },
   {
     key: 'propertyRate',
     label: 'Property',
     description:
-      'Reported burglary, larceny, motor vehicle theft, and arson as a share of population',
+      'Reported burglary, larceny, motor vehicle theft, and arson relative to population',
+  },
+];
+
+const demographicMetrics: DemographicMetricDefinition[] = [
+  {
+    key: 'white',
+    label: 'White alone',
+    description: 'Share of population reported as White alone',
+  },
+  {
+    key: 'black',
+    label: 'Black alone',
+    description:
+      'Share of population reported as Black or African American alone',
+  },
+  {
+    key: 'aian',
+    label: 'AIAN alone',
+    description:
+      'Share of population reported as American Indian and Alaska Native alone',
+  },
+  {
+    key: 'asian',
+    label: 'Asian alone',
+    description: 'Share of population reported as Asian alone',
+  },
+  {
+    key: 'nhpi',
+    label: 'NHPI alone',
+    description:
+      'Share of population reported as Native Hawaiian and Other Pacific Islander alone',
+  },
+  {
+    key: 'other',
+    label: 'Other race',
+    description: 'Share of population reported as some other race alone',
+  },
+  {
+    key: 'twoOrMore',
+    label: 'Two or more',
+    description: 'Share of population reported as two or more races',
+  },
+  {
+    key: 'hispanic',
+    label: 'Hispanic/Latino',
+    description: 'Share of population reported as Hispanic or Latino ethnicity',
   },
 ];
 
@@ -92,6 +156,82 @@ const formatPopulationPercent = (ratePer100k: number | null | undefined) => {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   }).format(ratePer100k / 1000)}%`;
+};
+
+const formatShare = (value: number | null | undefined) => {
+  if (value == null || !Number.isFinite(value)) {
+    return 'Not reported';
+  }
+
+  return `${new Intl.NumberFormat('en-US', {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1,
+  }).format(value)}%`;
+};
+
+const formatPer100k = (ratePer100k: number | null | undefined) => {
+  if (ratePer100k == null || !Number.isFinite(ratePer100k)) {
+    return 'Not reported';
+  }
+
+  return new Intl.NumberFormat('en-US', {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1,
+  }).format(ratePer100k);
+};
+
+const formatRateValue = (
+  ratePer100k: number | null | undefined,
+  rateMode: RateMode,
+) =>
+  rateMode === 'percent'
+    ? formatPopulationPercent(ratePer100k)
+    : formatPer100k(ratePer100k);
+
+const rateModeUnit = (rateMode: RateMode) =>
+  rateMode === 'percent' ? 'of population' : 'per 100k people';
+
+const formatRateWithUnit = (
+  ratePer100k: number | null | undefined,
+  rateMode: RateMode,
+) => {
+  const value = formatRateValue(ratePer100k, rateMode);
+  return value === 'Not reported' ? value : `${value} ${rateModeUnit(rateMode)}`;
+};
+
+const getDominantDemographicGroup = (stat: JurisdictionStats | undefined) =>
+  [...(stat?.demographics?.raceEthnicity || [])]
+    .filter((group) => typeof group.percent === 'number')
+    .sort((left, right) => (right.percent || 0) - (left.percent || 0))[0];
+
+const getMapMetricValue = (
+  stat: JurisdictionStats | undefined,
+  colorMetricMode: ColorMetricMode,
+  metricKey: MetricKey,
+) => {
+  if (!stat) {
+    return null;
+  }
+
+  if (colorMetricMode === 'race') {
+    return getDominantDemographicGroup(stat)?.percent ?? null;
+  }
+
+  return stat.hasData === false ? null : stat[metricKey];
+};
+
+const formatMapMetricValue = (
+  stat: JurisdictionStats | undefined,
+  colorMetricMode: ColorMetricMode,
+  metricKey: MetricKey,
+  rateMode: RateMode,
+) => {
+  if (colorMetricMode === 'race') {
+    const group = getDominantDemographicGroup(stat);
+    return group ? `${group.label}: ${formatShare(group.percent)}` : 'Not reported';
+  }
+
+  return formatRateWithUnit(stat?.[metricKey], rateMode);
 };
 
 const featureId = (mapFeature: MapFeature, width: number) =>
@@ -148,10 +288,15 @@ const topologyFeatures = (topology: unknown, objectName: string) =>
 
 const getFill = (
   stat: JurisdictionStats | undefined,
-  metric: MetricKey,
+  value: number | null | undefined,
+  colorMetricMode: ColorMetricMode,
   colorScale: ReturnType<typeof scaleQuantize<string>>,
 ) => {
-  const value = stat?.[metric];
+  if (colorMetricMode === 'race') {
+    const group = getDominantDemographicGroup(stat);
+    return group ? RACE_COLORS[group.key] : EMPTY_COLOR;
+  }
+
   return typeof value === 'number' && Number.isFinite(value)
     ? colorScale(value)
     : EMPTY_COLOR;
@@ -166,20 +311,85 @@ function StatLine({ label, value }: { label: string; value: string }) {
   );
 }
 
+function DemographicLine({ group }: { group: DemographicGroup }) {
+  const width = Math.max(0, Math.min(group.percent || 0, 100));
+
+  return (
+    <div className='demographic-line'>
+      <div>
+        <span>{group.label}</span>
+        <strong>{formatShare(group.percent)}</strong>
+      </div>
+      <div className='demographic-bar' aria-hidden='true'>
+        <span style={{ width: `${width}%` }} />
+      </div>
+      <small>{formatNumber(group.count)}</small>
+    </div>
+  );
+}
+
+function DemographicsSection({ shown }: { shown: JurisdictionStats }) {
+  const demographics = shown.demographics;
+
+  if (!demographics) {
+    return null;
+  }
+
+  return (
+    <div className='demographics-section'>
+      <h3>Race and ethnicity</h3>
+      {demographics.raceEthnicity.length > 0 ? (
+        <div className='demographic-list'>
+          {demographics.raceEthnicity.map((group) => (
+            <DemographicLine group={group} key={group.key} />
+          ))}
+        </div>
+      ) : (
+        <p className='panel-note'>
+          {demographics.caveats[0] || 'Race and ethnicity data unavailable.'}
+        </p>
+      )}
+
+      {demographics.raceEthnicity.length > 0
+        ? demographics.caveats.map((caveat) => (
+            <p className='panel-note muted' key={caveat}>
+              {caveat}
+            </p>
+          ))
+        : null}
+    </div>
+  );
+}
+
 function DetailPanel({
   selected,
   hovered,
-  metric,
+  crimeMetric,
+  colorMetricMode,
+  rateMode,
   sourceRefreshedAt,
   error,
 }: {
   selected?: JurisdictionStats;
   hovered?: string;
-  metric: MetricDefinition;
+  crimeMetric: MetricDefinition;
+  colorMetricMode: ColorMetricMode;
+  rateMode: RateMode;
   sourceRefreshedAt?: string;
   error?: string;
 }) {
   const shown = selected;
+  const dominantDemographicGroup = getDominantDemographicGroup(shown);
+  const heroValue =
+    shown && colorMetricMode === 'race'
+      ? formatShare(dominantDemographicGroup?.percent)
+      : formatRateValue(shown?.[crimeMetric.key], rateMode);
+  const heroLabel =
+    colorMetricMode === 'race'
+      ? dominantDemographicGroup?.label || 'Race and ethnicity'
+      : crimeMetric.label;
+  const heroUnit =
+    colorMetricMode === 'race' ? 'largest share' : rateModeUnit(rateMode);
 
   return (
     <aside className='detail-panel'>
@@ -198,9 +408,9 @@ function DetailPanel({
       {shown ? (
         <>
           <div className='rate-hero'>
-            <span>{metric.label}</span>
-            <strong>{formatPopulationPercent(shown[metric.key])}</strong>
-            <small>of population</small>
+            <span>{heroLabel}</span>
+            <strong>{heroValue}</strong>
+            <small>{heroUnit}</small>
           </div>
 
           <div className='stats-grid'>
@@ -232,6 +442,8 @@ function DetailPanel({
             ) : null}
           </div>
 
+          <DemographicsSection shown={shown} />
+
           <div className='offense-list'>
             <StatLine label='Homicide' value={formatNumber(shown.homicide)} />
             <StatLine label='Rape' value={formatNumber(shown.rape)} />
@@ -262,6 +474,7 @@ function DetailPanel({
       <div className='source-note'>
         <strong>Source</strong>
         <span>FBI Crime Data API, Uniform Crime Reporting Program</span>
+        <span>U.S. Census Bureau ACS 5-Year race and ethnicity tables</span>
         {sourceRefreshedAt ? (
           <span>Refreshed {new Date(sourceRefreshedAt).toLocaleString()}</span>
         ) : null}
@@ -275,7 +488,10 @@ function DetailPanel({
 
 function App() {
   const [splitMode, setSplitMode] = useState<SplitMode>('state');
+  const [colorMetricMode, setColorMetricMode] =
+    useState<ColorMetricMode>('crime');
   const [metricKey, setMetricKey] = useState<MetricKey>('totalRate');
+  const [rateMode, setRateMode] = useState<RateMode>('percent');
   const [stateStats, setStateStats] = useState<JurisdictionStats[]>([]);
   const [countyStatsByState, setCountyStatsByState] = useState<
     Record<string, JurisdictionStats[]>
@@ -343,14 +559,25 @@ function App() {
       ? countyStatsByFips
       : stateStatsByFips;
   const metricValues = [...currentStatsMap.values()]
-    .map((stat) => stat[metricKey])
+    .map((stat) =>
+      getMapMetricValue(
+        stat,
+        colorMetricMode,
+        metricKey,
+      ),
+    )
     .filter(
       (value): value is number =>
         typeof value === 'number' && Number.isFinite(value),
     );
   const metricExtent = extent(metricValues);
+  const colorDomainMin = Math.max(0, metricExtent[0] || 0);
+  const colorDomainMax =
+    metricExtent[1] != null && metricExtent[1] > colorDomainMin
+      ? metricExtent[1]
+      : colorDomainMin + 1;
   const colorScale = scaleQuantize<string>()
-    .domain([Math.max(0, metricExtent[0] || 0), metricExtent[1] || 1])
+    .domain([colorDomainMin, colorDomainMax])
     .range(COLORS);
 
   const projection = useMemo(() => {
@@ -528,8 +755,16 @@ function App() {
         Math.max(10, rect.height - 92),
       ),
       name,
-      metricLabel: selectedMetric.label,
-      value: formatPopulationPercent(stat?.[metricKey]),
+      metricLabel:
+        colorMetricMode === 'race'
+          ? 'Dominant race/ethnicity'
+          : selectedMetric.label,
+      value: formatMapMetricValue(
+        stat,
+        colorMetricMode,
+        metricKey,
+        rateMode,
+      ),
     });
   };
 
@@ -542,8 +777,8 @@ function App() {
     <main className='app-shell'>
       <header className='toolbar'>
         <div className='brand-block'>
-          <h1>US Crime Statistics Map</h1>
-          <p>Official FBI UCR data by state and county rollup</p>
+          <h1>US Infographic Statistics Map</h1>
+          <p>Official data by state and county rollup</p>
         </div>
 
         <div className='toolbar-controls'>
@@ -565,16 +800,54 @@ function App() {
             </button>
           </div>
 
-          <select
-            value={metricKey}
-            onChange={(event) => setMetricKey(event.target.value as MetricKey)}
-          >
-            {metrics.map((metric) => (
-              <option value={metric.key} key={metric.key}>
-                {metric.label}
-              </option>
-            ))}
-          </select>
+          <div className='segmented color-mode' aria-label='Color source'>
+            <button
+              className={colorMetricMode === 'crime' ? 'active' : ''}
+              onClick={() => setColorMetricMode('crime')}
+            >
+              Crime
+            </button>
+            <button
+              className={colorMetricMode === 'race' ? 'active' : ''}
+              onClick={() => setColorMetricMode('race')}
+            >
+              Race
+            </button>
+          </div>
+
+          {colorMetricMode === 'crime' ? (
+            <select
+              value={metricKey}
+              onChange={(event) =>
+                setMetricKey(event.target.value as MetricKey)
+              }
+            >
+              {metrics.map((metric) => (
+                <option value={metric.key} key={metric.key}>
+                  {metric.label}
+                </option>
+              ))}
+            </select>
+          ) : null}
+
+          {colorMetricMode === 'crime' ? (
+            <div className='segmented rate-mode' aria-label='Rate display'>
+              <button
+                className={rateMode === 'percent' ? 'active' : ''}
+                title='Show as percent of population'
+                onClick={() => setRateMode('percent')}
+              >
+                %
+              </button>
+              <button
+                className={rateMode === 'per100k' ? 'active' : ''}
+                title='Show per 100,000 people'
+                onClick={() => setRateMode('per100k')}
+              >
+                100k
+              </button>
+            </div>
+          ) : null}
 
           <button
             className='icon-button'
@@ -583,6 +856,15 @@ function App() {
           >
             <RefreshCw size={18} aria-hidden='true' />
           </button>
+
+          <a
+            className='support-link'
+            href={BUY_ME_A_COFFEE_URL}
+            target='_blank'
+            rel='noreferrer'
+          >
+            Buy me a coffee
+          </a>
         </div>
       </header>
 
@@ -604,7 +886,11 @@ function App() {
                 Reset
               </button>
             )}
-            <span>{selectedMetric.description}</span>
+            <span>
+              {colorMetricMode === 'race'
+                ? 'Dominant race or ethnicity group by largest population share'
+                : selectedMetric.description}
+            </span>
           </div>
 
           <svg
@@ -621,6 +907,11 @@ function App() {
                   splitMode === 'county' && selectedStateFips ? 5 : 2,
                 );
                 const stat = currentStatsMap.get(id);
+                const value = getMapMetricValue(
+                  stat,
+                  colorMetricMode,
+                  metricKey,
+                );
                 const name =
                   stat?.name ||
                   mapFeature.properties?.name ||
@@ -634,7 +925,7 @@ function App() {
                     key={id}
                     className={`map-shape${selected ? ' selected' : ''}`}
                     d={pathGenerator(mapFeature as never) || undefined}
-                    fill={getFill(stat, metricKey, colorScale)}
+                    fill={getFill(stat, value, colorMetricMode, colorScale)}
                     onClick={() => handleFeatureClick(mapFeature)}
                     onMouseEnter={(event) => {
                       setHoveredName(name);
@@ -643,7 +934,12 @@ function App() {
                     onMouseMove={(event) => updateTooltip(event, name, stat)}
                     onMouseLeave={clearHover}
                   >
-                    <title>{`${name}: ${formatPopulationPercent(stat?.[metricKey])} of population`}</title>
+                    <title>{`${name}: ${formatMapMetricValue(
+                      stat,
+                      colorMetricMode,
+                      metricKey,
+                      rateMode,
+                    )}`}</title>
                   </path>
                 );
               })}
@@ -693,17 +989,39 @@ function App() {
             </div>
           ) : null}
 
-          <div className='legend' aria-label='Color legend'>
-            <small>Lower</small>
-            {COLORS.map((color, index) => (
-              <span
-                style={{ background: color }}
-                key={color}
-                title={`Band ${index + 1}`}
-              />
-            ))}
-            <small>Higher</small>
-          </div>
+          {colorMetricMode === 'race' ? (
+            <div
+              className='legend race-legend'
+              aria-label='Race and ethnicity color legend'
+            >
+              {demographicMetrics.map((metric) => (
+                <span className='race-legend-item' key={metric.key}>
+                  <i
+                    className='race-legend-swatch'
+                    style={{ background: RACE_COLORS[metric.key] }}
+                    aria-hidden='true'
+                  />
+                  <small>{metric.label}</small>
+                </span>
+              ))}
+            </div>
+          ) : (
+            <div
+              className='legend legend-gradient'
+              aria-label='Crime rate color legend'
+            >
+              <small>Lower</small>
+              {COLORS.map((color, index) => (
+                <span
+                  className='legend-band'
+                  style={{ background: color }}
+                  key={color}
+                  title={`Band ${index + 1}`}
+                />
+              ))}
+              <small>Higher</small>
+            </div>
+          )}
 
           {loading || loadingCounty ? (
             <div className='loading-strip'>
@@ -715,7 +1033,9 @@ function App() {
         <DetailPanel
           selected={selectedStats}
           hovered={hoveredName}
-          metric={selectedMetric}
+          crimeMetric={selectedMetric}
+          colorMetricMode={colorMetricMode}
+          rateMode={rateMode}
           sourceRefreshedAt={refreshedAt}
           error={error}
         />
